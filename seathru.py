@@ -1,29 +1,37 @@
-import collections
-import sys
 import argparse
+import collections
+import math
+import sys
+
+import matplotlib
 import numpy as np
-import sklearn as sk
+import rawpy
 import scipy as sp
 import scipy.optimize
 import scipy.stats
-import math
 from PIL import Image
-import rawpy
-import matplotlib
 from matplotlib import pyplot as plt
 from skimage import exposure
+from skimage.morphology import closing, disk, square
 from skimage.restoration import denoise_bilateral, denoise_tv_chambolle, estimate_sigma
-from skimage.morphology import closing, opening, erosion, dilation, disk, diamond, square
 
 matplotlib.use('TkAgg')
 
-'''
-Finds points for which to estimate backscatter
-by partitioning the image into different depth
-ranges and taking the darkest RGB triplets 
-from that set as estimations of the backscatter
-'''
+
 def find_backscatter_estimation_points(img, depths, num_bins=10, fraction=0.01, max_vals=20, min_depth_percent=0.0):
+    """
+    Finds points for which to estimate backscatter by partitioning the image into different depth
+    ranges and taking the darkest RGB triplets from that set as estimations of the backscatter.
+
+    :param img:
+    :param depths:
+    :param num_bins:
+    :param fraction:
+    :param max_vals:
+    :param min_depth_percent:
+    :return:
+    """
+
     z_max, z_min = np.max(depths), np.min(depths)
     min_depth = z_min + (min_depth_percent * (z_max - z_min))
     z_ranges = np.linspace(z_min, z_max, num_bins + 1)
@@ -32,7 +40,7 @@ def find_backscatter_estimation_points(img, depths, num_bins=10, fraction=0.01, 
     points_g = []
     points_b = []
     for i in range(len(z_ranges) - 1):
-        a, b = z_ranges[i], z_ranges[i+1]
+        a, b = z_ranges[i], z_ranges[i + 1]
         locs = np.where(np.logical_and(depths > min_depth, np.logical_and(depths >= a, depths <= b)))
         norms_in_range, px_in_range, depths_in_range = img_norms[locs], img[locs], depths[locs]
         arr = sorted(zip(norms_in_range, px_in_range, depths_in_range), key=lambda x: x[0])
@@ -42,24 +50,34 @@ def find_backscatter_estimation_points(img, depths, num_bins=10, fraction=0.01, 
         points_b.extend([(z, p[2]) for n, p, z in points])
     return np.array(points_r), np.array(points_g), np.array(points_b)
 
-'''
-Estimates coefficients for the backscatter curve
-based on the backscatter point values and their depths
-'''
+
 def find_backscatter_values(B_pts, depths, restarts=10, max_mean_loss_fraction=0.1):
+    """
+    Estimates coefficients for the backscatter curve based on the backscatter point values and their depths.
+
+    :param B_pts:
+    :param depths:
+    :param restarts:
+    :param max_mean_loss_fraction:
+    :return:
+    """
+
     B_vals, B_depths = B_pts[:, 1], B_pts[:, 0]
     z_max, z_min = np.max(depths), np.min(depths)
     max_mean_loss = max_mean_loss_fraction * (z_max - z_min)
     coefs = None
     best_loss = np.inf
+
     def estimate(depths, B_inf, beta_B, J_prime, beta_D_prime):
         val = (B_inf * (1 - np.exp(-1 * beta_B * depths))) + (J_prime * np.exp(-1 * beta_D_prime * depths))
         return val
+
     def loss(B_inf, beta_B, J_prime, beta_D_prime):
         val = np.mean(np.abs(B_vals - estimate(B_depths, B_inf, beta_B, J_prime, beta_D_prime)))
         return val
-    bounds_lower = [0,0,0,0]
-    bounds_upper = [1,5,1,5]
+
+    bounds_lower = [0, 0, 0, 0]
+    bounds_upper = [1, 5, 1, 5]
     for _ in range(restarts):
         try:
             optp, pcov = sp.optimize.curve_fit(
@@ -82,10 +100,22 @@ def find_backscatter_values(B_pts, depths, restarts=10, max_mean_loss_fraction=0
         return BD, np.array([slope, intercept])
     return estimate(depths, *coefs), coefs
 
-'''
-Estimate illumination map from local color space averaging
-'''
+
 def estimate_illumination(img, B, neighborhood_map, num_neighborhoods, p=0.5, f=2.0, max_iters=100, tol=1E-5):
+    """
+    Estimate illumination map from local color space averaging.
+
+    :param img:
+    :param B:
+    :param neighborhood_map:
+    :param num_neighborhoods:
+    :param p:
+    :param f:
+    :param max_iters:
+    :param tol:
+    :return:
+    """
+
     D = img - B
     avg_cs = np.zeros_like(img)
     avg_cs_prime = np.copy(avg_cs)
@@ -100,25 +130,42 @@ def estimate_illumination(img, B, neighborhood_map, num_neighborhoods, p=0.5, f=
             size = sizes[label - 1] - 1
             avg_cs_prime[locs] = (1 / size) * (np.sum(avg_cs[locs]) - avg_cs[locs])
         new_avg_cs = (D * p) + (avg_cs_prime * (1 - p))
-        if(np.max(np.abs(avg_cs - new_avg_cs)) < tol):
+        if (np.max(np.abs(avg_cs - new_avg_cs)) < tol):
             break
         avg_cs = new_avg_cs
     return f * denoise_bilateral(np.maximum(0, avg_cs))
 
-'''
-Estimate values for beta_D
-'''
-def estimate_wideband_attentuation(depths, illum, radius = 6, max_val = 10.0):
+
+def estimate_wideband_attentuation(depths, illum, radius=6, max_val=10.0):
+    """
+    Estimate values for beta_D
+
+    :param depths:
+    :param illum:
+    :param radius:
+    :param max_val:
+    :return:
+    """
+
     eps = 1E-8
     BD = np.minimum(max_val, -np.log(illum + eps) / (np.maximum(0, depths) + eps))
     mask = np.where(np.logical_and(depths > eps, illum > eps), 1, 0)
     refined_attenuations = denoise_bilateral(closing(np.maximum(0, BD * mask), disk(radius)))
     return refined_attenuations, []
 
-'''
-Calculate the values of beta_D for an image from the depths, illuminations, and constants
-'''
+
 def calculate_beta_D(depths, a, b, c, d):
+    """
+    Calculate the values of beta_D for an image from the depths, illuminations, and constants.
+
+    :param depths:
+    :param a:
+    :param b:
+    :param c:
+    :param d:
+    :return:
+    """
+
     return (a * np.exp(b * depths)) + (c * np.exp(d * depths))
 
 
@@ -148,11 +195,23 @@ def filter_data(X, Y, radius_fraction=0.01):
             tempY.append(Y_s[i])
     return np.array(dX), np.array(dY)
 
-'''
-Estimate coefficients for the 2-term exponential
-describing the wideband attenuation
-'''
-def refine_wideband_attentuation(depths, illum, estimation, restarts=10, min_depth_fraction = 0.1, max_mean_loss_fraction=np.inf, l=1.0, radius_fraction=0.01):
+
+def refine_wideband_attentuation(depths, illum, estimation, restarts=10, min_depth_fraction=0.1, max_mean_loss_fraction=np.inf, l=1.0,
+                                 radius_fraction=0.01):
+    """
+    Estimate coefficients for the 2-term exponential describing the wideband attenuation.
+
+    :param depths:
+    :param illum:
+    :param estimation:
+    :param restarts:
+    :param min_depth_fraction:
+    :param max_mean_loss_fraction:
+    :param l:
+    :param radius_fraction:
+    :return:
+    """
+
     eps = 1E-8
     z_max, z_min = np.max(depths), np.min(depths)
     min_depth = z_min + (min_depth_fraction * (z_max - z_min))
@@ -160,12 +219,15 @@ def refine_wideband_attentuation(depths, illum, estimation, restarts=10, min_dep
     coefs = None
     best_loss = np.inf
     locs = np.where(np.logical_and(illum > 0, np.logical_and(depths > min_depth, estimation > eps)))
+
     def calculate_reconstructed_depths(depths, illum, a, b, c, d):
         eps = 1E-5
         res = -np.log(illum + eps) / (calculate_beta_D(depths, a, b, c, d) + eps)
         return res
+
     def loss(a, b, c, d):
         return np.mean(np.abs(depths[locs] - calculate_reconstructed_depths(depths[locs], illum[locs], a, b, c, d)))
+
     dX, dY = filter_data(depths[locs], estimation[locs], radius_fraction)
     for _ in range(restarts):
         try:
@@ -195,11 +257,19 @@ def refine_wideband_attentuation(depths, illum, estimation, restarts=10, min_dep
     BD = l * calculate_beta_D(depths, *coefs)
     return BD, coefs
 
-'''
-Reconstruct the scene and globally white balance
-based the Gray World Hypothesis
-'''
+
 def recover_image(img, depths, B, beta_D, nmap):
+    """
+    Reconstruct the scene and globally white balance based the Gray World Hypothesis.
+
+    :param img:
+    :param depths:
+    :param B:
+    :param beta_D:
+    :param nmap:
+    :return:
+    """
+
     res = (img - B) * np.exp(beta_D * np.expand_dims(depths, axis=2))
     res = np.maximum(0.0, np.minimum(1.0, res))
     res[nmap == 0] = 0
@@ -208,10 +278,17 @@ def recover_image(img, depths, B, beta_D, nmap):
     return res
 
 
-'''
-Reconstruct the scene and globally white balance
-'''
 def recover_image_S4(img, B, illum, nmap):
+    """
+    Reconstruct the scene and globally white balance.
+
+    :param img:
+    :param B:
+    :param illum:
+    :param nmap:
+    :return:
+    """
+
     eps = 1E-8
     res = (img - B) / (illum + eps)
     res = np.maximum(0.0, np.minimum(1.0, res))
@@ -219,11 +296,15 @@ def recover_image_S4(img, B, illum, nmap):
     return scale(wbalance_no_red_gw(res))
 
 
-'''
-Constructs a neighborhood map from depths and 
-epsilon
-'''
 def construct_neighborhood_map(depths, epsilon=0.05):
+    """
+    Constructs a neighborhood map from depths and epsilon.
+
+    :param depths:
+    :param epsilon:
+    :return:
+    """
+
     eps = (np.max(depths) - np.min(depths)) * epsilon
     nmap = np.zeros_like(depths).astype(np.int32)
     n_neighborhoods = 1
@@ -256,13 +337,20 @@ def construct_neighborhood_map(depths, epsilon=0.05):
         n_neighborhoods += 1
     zeros_size_arr = sorted(zip(*np.unique(nmap[depths == 0], return_counts=True)), key=lambda x: x[1], reverse=True)
     if len(zeros_size_arr) > 0:
-        nmap[nmap == zeros_size_arr[0][0]] = 0 #reset largest background to 0
+        nmap[nmap == zeros_size_arr[0][0]] = 0  # reset largest background to 0
     return nmap, n_neighborhoods - 1
 
-'''
-Finds the closest nonzero label to a location
-'''
+
 def find_closest_label(nmap, start_x, start_y):
+    """
+    Finds the closest nonzero label to a location.
+
+    :param nmap:
+    :param start_x:
+    :param start_y:
+    :return:
+    """
+
     mask = np.zeros_like(nmap).astype(np.bool)
     q = collections.deque()
     q.append((start_x, start_y))
@@ -290,10 +378,16 @@ def find_closest_label(nmap, start_x, start_y):
                     q.append((x2, y2))
 
 
-'''
-Refines the neighborhood map to remove artifacts
-'''
-def refine_neighborhood_map(nmap, min_size = 10, radius = 3):
+def refine_neighborhood_map(nmap, min_size=10, radius=3):
+    """
+    Refines the neighborhood map to remove artifacts.
+
+    :param nmap:
+    :param min_size:
+    :param radius:
+    :return:
+    """
+
     refined_nmap = np.zeros_like(nmap)
     vals, counts = np.unique(nmap, return_counts=True)
     neighborhood_sizes = sorted(zip(vals, counts), key=lambda x: x[1], reverse=True)
@@ -310,24 +404,29 @@ def refine_neighborhood_map(nmap, min_size = 10, radius = 3):
     return refined_nmap, num_labels - 1
 
 
-def load_image_and_depth_map(img_fname, depths_fname, size_limit = 1024):
+def load_image_and_depth_map(img_fname, depths_fname, size_limit=1024):
     depths = Image.open(depths_fname)
     img = Image.fromarray(rawpy.imread(img_fname).postprocess())
     img.thumbnail((size_limit, size_limit), Image.ANTIALIAS)
     depths = depths.resize(img.size, Image.ANTIALIAS)
     return np.float32(img) / 255.0, np.array(depths)
 
-'''
-White balance with 'grey world' hypothesis
-'''
+
 def wbalance_gw(img):
+    """
+    White balance with 'grey world' hypothesis.
+
+    :param img:
+    :return:
+    """
+
     dr = 1.0 / np.mean(img[:, :, 0])
     dg = 1.0 / np.mean(img[:, :, 1])
     db = 1.0 / np.mean(img[:, :, 2])
     dsum = dr + dg + db
-    dr = dr / dsum * 3.
-    dg = dg / dsum * 3.
-    db = db / dsum * 3.
+    dr = dr / dsum * 3.0
+    dg = dg / dsum * 3.0
+    db = db / dsum * 3.0
 
     img[:, :, 0] *= dr
     img[:, :, 1] *= dg
@@ -335,27 +434,36 @@ def wbalance_gw(img):
     return img
 
 
-'''
-White balance based on top 10% average values of each channel
-'''
 def wbalance_10p(img):
+    """
+    White balance based on top 10% average values of each channel.
+
+    :param img:
+    :return:
+    """
+
     dr = 1.0 / np.mean(np.sort(img[:, :, 0], axis=None)[int(round(-1 * np.size(img[:, :, 0]) * 0.1)):])
     dg = 1.0 / np.mean(np.sort(img[:, :, 1], axis=None)[int(round(-1 * np.size(img[:, :, 0]) * 0.1)):])
     db = 1.0 / np.mean(np.sort(img[:, :, 2], axis=None)[int(round(-1 * np.size(img[:, :, 0]) * 0.1)):])
     dsum = dr + dg + db
-    dr = dr / dsum * 3.
-    dg = dg / dsum * 3.
-    db = db / dsum * 3.
+    dr = dr / dsum * 3.0
+    dg = dg / dsum * 3.0
+    db = db / dsum * 3.0
 
     img[:, :, 0] *= dr
     img[:, :, 1] *= dg
     img[:, :, 2] *= db
     return img
 
-'''
-White balance based on top 10% average values of blue and green channel
-'''
+
 def wbalance_no_red_10p(img):
+    """
+    White balance based on top 10% average values of blue and green channel.
+
+    :param img:
+    :return:
+    """
+
     dg = 1.0 / np.mean(np.sort(img[:, :, 1], axis=None)[int(round(-1 * np.size(img[:, :, 0]) * 0.1)):])
     db = 1.0 / np.mean(np.sort(img[:, :, 2], axis=None)[int(round(-1 * np.size(img[:, :, 0]) * 0.1)):])
     dsum = dg + db
@@ -366,10 +474,15 @@ def wbalance_no_red_10p(img):
     img[:, :, 2] *= db
     return img
 
-'''
-White balance with 'grey world' hypothesis
-'''
+
 def wbalance_no_red_gw(img):
+    """
+    White balance with 'grey world' hypothesis
+
+    :param img:
+    :return:
+    """
+
     dg = 1.0 / np.mean(img[:, :, 1])
     db = 1.0 / np.mean(img[:, :, 2])
     dsum = dg + db
@@ -381,8 +494,10 @@ def wbalance_no_red_gw(img):
     img[:, :, 2] *= db
     return img
 
+
 def scale(img):
     return (img - np.min(img)) / (np.max(img) - np.min(img))
+
 
 def run_pipeline(img, depths, args):
     if 'output_graphs' not in args:
@@ -402,11 +517,13 @@ def run_pipeline(img, depths, args):
 
     if args.output_graphs:
         print('Coefficients: \n{}\n{}\n{}'.format(coefsR, coefsG, coefsB), flush=True)
+
         def eval_xs(xs, coefs):
             if len(coefs) == 2:
                 return xs * coefs[0] + coefs[1]
             else:
                 return ((coefs[0] * (1 - np.exp(-coefs[1] * xs))) + (coefs[2] * np.exp(-coefs[3] * xs)))
+
         # check optimization for B channel
         plt.clf()
         plt.scatter(ptsB[:, 0].ravel(), ptsB[:, 1].ravel(), c='b')
@@ -474,11 +591,13 @@ def run_pipeline(img, depths, args):
     # check optimization for beta_D channel
     if args.output_graphs:
         eps = 1E-5
+
         def eval_xs(xs, coefs):
             if len(coefs) == 2:
                 return xs * coefs[0] + coefs[1]
             else:
                 return (coefs[0] * np.exp(coefs[1] * xs)) + (coefs[2] * np.exp(coefs[3] * xs))
+
         locs = np.where(
             np.logical_and(beta_D_r > eps, np.logical_and(beta_D_g > eps, np.logical_and(depths > eps, beta_D_b > eps))))
         plt.scatter(depths[locs].ravel(), beta_D_b[locs].ravel(), c='b', alpha=0.1, edgecolors='none')
@@ -501,7 +620,6 @@ def run_pipeline(img, depths, args):
     B = np.stack([Br, Bg, Bb], axis=2)
     beta_D = np.stack([refined_beta_D_r, refined_beta_D_g, refined_beta_D_b], axis=2)
     recovered = recover_image(img, depths, B, beta_D, nmap)
-
 
     if args.output_graphs:
         beta_D = (beta_D - np.min(beta_D)) / (np.max(beta_D) - np.min(beta_D))
@@ -530,11 +648,13 @@ def run_pipeline(img, depths, args):
 
     return recovered
 
+
 def preprocess_for_monodepth(img_fname, output_fname, size_limit=1024):
     img = Image.fromarray(rawpy.imread(img_fname).postprocess())
     img.thumbnail((size_limit, size_limit), Image.ANTIALIAS)
     img_adapteq = exposure.equalize_adapthist(np.array(img), clip_limit=0.03)
     Image.fromarray((np.round(img_adapteq * 255.0)).astype(np.uint8)).save(output_fname)
+
 
 def preprocess_sfm_depth_map(depths, min_depth, max_depth):
     z_min = np.min(depths) + (min_depth * (np.max(depths) - np.min(depths)))
@@ -544,11 +664,13 @@ def preprocess_sfm_depth_map(depths, min_depth, max_depth):
     depths[depths < z_min] = 0
     return depths
 
+
 def preprocess_monodepth_depth_map(depths, additive_depth, multiply_depth):
     depths = ((depths - np.min(depths)) / (
-                np.max(depths) - np.min(depths))).astype(np.float32)
+            np.max(depths) - np.min(depths))).astype(np.float32)
     depths = (multiply_depth * (1.0 - depths)) + additive_depth
     return depths
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -560,7 +682,8 @@ if __name__ == '__main__':
     parser.add_argument('--p', type=float, default=0.01, help='p value (controls locality of illuminant map)')
     parser.add_argument('--min-depth', type=float, default=0.1, help='Minimum depth value to use in estimations (range 0-1)')
     parser.add_argument('--max-depth', type=float, default=1.0, help='Replacement depth percentile value for invalid depths (range 0-1)')
-    parser.add_argument('--spread-data-fraction', type=float, default=0.01, help='Require data to be this fraction of depth range away from each other in attenuation estimations')
+    parser.add_argument('--spread-data-fraction', type=float, default=0.01,
+                        help='Require data to be this fraction of depth range away from each other in attenuation estimations')
     parser.add_argument('--size', type=int, default=320, help='Size to output')
     parser.add_argument('--output-graphs', action='store_true', help='Output graphs')
     parser.add_argument('--preprocess-for-monodepth', action='store_true', help='Preprocess for monodepth depth maps')
