@@ -1,27 +1,17 @@
 from __future__ import absolute_import, division, print_function
 
 import os
-import sys
-import glob
 import argparse
-import time
-import io
 
-import numpy as np
 import PIL.Image as pil
-import matplotlib as mpl
-import matplotlib.cm as cm
-import pynng
-from pynng import nng
-
+import rawpy
 import torch
-from torchvision import transforms, datasets
+from torchvision import transforms
+import numpy as np
 
 import deps.monodepth2.networks as networks
-from deps.monodepth2.layers import disp_to_depth
 from deps.monodepth2.utils import download_model_if_doesnt_exist
-
-from seathru import *
+from seathru import preprocess_monodepth_depth_map, run_pipeline, estimate_sigma, denoise_tv_chambolle
 
 
 def run(args):
@@ -64,11 +54,11 @@ def run(args):
     depth_decoder.eval()
 
     # Load image and preprocess
-    img = Image.fromarray(rawpy.imread(args.image).postprocess()) if args.raw else pil.open(args.image).convert('RGB')
-    img.thumbnail((args.size, args.size), Image.ANTIALIAS)
+    img = pil.fromarray(rawpy.imread(args.image).postprocess()) if args.raw else pil.open(args.image).convert('RGB')
+    img.thumbnail((args.size, args.size), pil.ANTIALIAS)
     original_width, original_height = img.size
     # img = exposure.equalize_adapthist(np.array(img), clip_limit=0.03)
-    # img = Image.fromarray((np.round(img * 255.0)).astype(np.uint8))
+    # img = pil.fromarray((np.round(img * 255.0)).astype(np.uint8))
     input_image = img.resize((feed_width, feed_height), pil.LANCZOS)
     input_image = transforms.ToTensor()(input_image).unsqueeze(0)
     print('Preprocessed image', flush=True)
@@ -94,15 +84,19 @@ def run(args):
     # recovered = exposure.equalize_adapthist(scale(np.array(recovered)), clip_limit=0.03)
     sigma_est = estimate_sigma(recovered, multichannel=True, average_sigmas=True) / 10.0
     recovered = denoise_tv_chambolle(recovered, sigma_est, multichannel=True)
-    im = Image.fromarray((np.round(recovered * 255.0)).astype(np.uint8))
-    im.save(args.output, format='png')
+    im = pil.fromarray((np.round(recovered * 255.0)).astype(np.uint8))
+
+    from pathlib import Path
+    p = Path(args.image)
+
+    im.save(args.output.format(p.stem), format='png')
     print('Done.')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--image', required=True, help='Input image')
-    parser.add_argument('--output', default='output.png', help='Output filename')
+    parser.add_argument('--output', default='outputs/{0}.png', help='Output filename')
     parser.add_argument('--f', type=float, default=2.0, help='f value (controls brightness)')
     parser.add_argument('--l', type=float, default=0.5, help='l value (controls balance of attenuation constants)')
     parser.add_argument('--p', type=float, default=0.01, help='p value (controls locality of illuminant map)')
@@ -119,6 +113,7 @@ if __name__ == '__main__':
     parser.add_argument('--model-name', type=str, default="mono_1024x320",
                         help='monodepth model name')
     parser.add_argument('--output-graphs', action='store_true', help='Output graphs')
+    parser.add_argument('--result-graphs', action='store_true', help='Result graphs')
     parser.add_argument('--raw', action='store_true', help='RAW image')
     args = parser.parse_args()
     run(args)

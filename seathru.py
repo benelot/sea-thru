@@ -253,7 +253,7 @@ def refine_wideband_attentuation(depths, illum, estimation, restarts=10, min_dep
         slope, intercept, r_value, p_value, std_err = sp.stats.linregress(depths[locs], estimation[locs])
         BD = (slope * depths + intercept)
         return l * BD, np.array([slope, intercept])
-    print(f'Found best loss {best_loss}', flush=True)
+    print(f'  Found best loss {best_loss}', flush=True)
     BD = l * calculate_beta_D(depths, *coefs)
     return BD, coefs
 
@@ -544,7 +544,7 @@ def run_pipeline(img, depths, args):
         plt.xlabel('Depth (m)')
         plt.ylabel('Color value')
         plt.title('Modelled $B_c$ values')
-        plt.savefig('Bc_values.png')
+        plt.savefig('debug/Bc_values.png')
         plt.show()
 
     print('Constructing neighborhood map...', flush=True)
@@ -568,10 +568,15 @@ def run_pipeline(img, depths, args):
         plt.show()
 
     print('Estimating wideband attenuation...', flush=True)
+    print('  r channel:')
     beta_D_r, _ = estimate_wideband_attentuation(depths, illR)
     refined_beta_D_r, coefsR = refine_wideband_attentuation(depths, illR, beta_D_r, radius_fraction=args.spread_data_fraction, l=args.l)
+
+    print('  g channel:')
     beta_D_g, _ = estimate_wideband_attentuation(depths, illG)
     refined_beta_D_g, coefsG = refine_wideband_attentuation(depths, illG, beta_D_g, radius_fraction=args.spread_data_fraction, l=args.l)
+
+    print('  b channel:')
     beta_D_b, _ = estimate_wideband_attentuation(depths, illB)
     refined_beta_D_b, coefsB = refine_wideband_attentuation(depths, illB, beta_D_b, radius_fraction=args.spread_data_fraction, l=args.l)
 
@@ -613,7 +618,7 @@ def run_pipeline(img, depths, args):
         plt.xlabel('Depth (m)')
         plt.ylabel('$\\beta^D$')
         plt.title('Modelled $\\beta^D$ values')
-        plt.savefig('betaD_values.png')
+        plt.savefig('debug/betaD_values.png')
         plt.show()
 
     print('Reconstructing image...', flush=True)
@@ -621,7 +626,10 @@ def run_pipeline(img, depths, args):
     beta_D = np.stack([refined_beta_D_r, refined_beta_D_g, refined_beta_D_b], axis=2)
     recovered = recover_image(img, depths, B, beta_D, nmap)
 
-    if args.output_graphs:
+    if args.result_graphs:
+        from pathlib import Path
+        p = Path(args.image)
+
         beta_D = (beta_D - np.min(beta_D)) / (np.max(beta_D) - np.min(beta_D))
         fig = plt.figure(figsize=(50, 20))
         fig.add_subplot(2, 3, 1)
@@ -642,8 +650,8 @@ def run_pipeline(img, depths, args):
         fig.add_subplot(2, 3, 6)
         plt.imshow(recovered)
         plt.title('Recovered Image')
-        plt.tight_layout(True)
-        plt.savefig('components.png')
+        # plt.tight_layout(True)
+        plt.savefig('debug/{0}_components.png'.format(p.stem))
         plt.show()
 
     return recovered
@@ -666,8 +674,7 @@ def preprocess_sfm_depth_map(depths, min_depth, max_depth):
 
 
 def preprocess_monodepth_depth_map(depths, additive_depth, multiply_depth):
-    depths = ((depths - np.min(depths)) / (
-            np.max(depths) - np.min(depths))).astype(np.float32)
+    depths = ((depths - np.min(depths)) / (np.max(depths) - np.min(depths))).astype(np.float32)
     depths = (multiply_depth * (1.0 - depths)) + additive_depth
     return depths
 
@@ -676,7 +683,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--image', required=True, help='Input image')
     parser.add_argument('--depth-map', required=True, help='Input depth map')
-    parser.add_argument('--output', default='output.png', help='Output filename')
+    parser.add_argument('--output', default='./outputs/output_sea_thru.png', help='Output filename')
     parser.add_argument('--f', type=float, default=2.0, help='f value (controls brightness)')
     parser.add_argument('--l', type=float, default=0.5, help='l value (controls balance of attenuation constants)')
     parser.add_argument('--p', type=float, default=0.01, help='p value (controls locality of illuminant map)')
